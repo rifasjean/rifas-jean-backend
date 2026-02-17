@@ -5,6 +5,10 @@ const app = express();
 
 app.use(bodyParser.json());
 
+app.get("/", (req, res) => {
+  res.send("Servidor activo");
+});
+
 const MAX_NUMBER = 200000;
 const DB_FILE = "tickets.json";
 
@@ -49,7 +53,7 @@ function generateTickets(qty) {
 app.post("/webhook", (req, res) => {
   const order = req.body;
 
-  let qty = 1;
+  let qty = 0;
 
   order.line_items.forEach(item => {
     if (item.title.includes("1 Ticket")) qty += 1;
@@ -59,11 +63,13 @@ app.post("/webhook", (req, res) => {
 
   const tickets = generateTickets(qty);
 
-  console.log("Tickets generados:", tickets);
+  console.log("🔥 Tickets generados:", tickets);
 
   res.status(200).send({ tickets });
 });
 
-app.listen(3000, () => {
-  console.log("Servidor corriendo");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Servidor corriendo en puerto", PORT);
 });

@@ -82,7 +82,7 @@ order.line_items.forEach(item => {
   console.log("🔥 Tickets generados:", tickets);
 // ENVIAR EMAIL CON TICKETS
 try {
-  const email = order.customer?.email;
+  const email = order.email;
 
   if (email && tickets.length > 0) {
     await transporter.sendMail({

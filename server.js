@@ -51,7 +51,7 @@ function generateTickets(qty) {
   return tickets;
 }
 
-app.post("/webhook", (req, res) => {
+app.post("/webhook", async (req, res) => {
   const order = req.body;
 
   console.log("🧾 Pedido recibido:");
@@ -78,9 +78,10 @@ try {
     `https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${order.id}.json`,
     {
       order: {
-        id: order.id,
-        name: `RJ-${order.order_number}-${Math.floor(Math.random()*900+100)}`
-      }
+  id: order.id,
+  note: "Tickets: " + tickets.join(", "),
+  name: `RJ-${order.order_number}-${Math.floor(Math.random()*900+100)}`
+}
     },
     {
       headers: {

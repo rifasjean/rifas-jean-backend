@@ -2,9 +2,17 @@ const axios = require("axios");
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
+const nodemailer = require("nodemailer");
 const app = express();
 
 app.use(bodyParser.json());
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
 
 app.get("/", (req, res) => {
   res.send("Servidor activo");
@@ -72,6 +80,28 @@ order.line_items.forEach(item => {
   const tickets = generateTickets(qty);
 
   console.log("🔥 Tickets generados:", tickets);
+// ENVIAR EMAIL CON TICKETS
+try {
+  const email = order.customer?.email;
+
+  if (email && tickets.length > 0) {
+    await transporter.sendMail({
+      from: `"Rifas Jean" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "🎟️ Tus números de rifa",
+      html: `
+        <h2>Gracias por tu compra</h2>
+        <p>Estos son tus números:</p>
+        <h3>${tickets.join(", ")}</h3>
+        <p>Mucha suerte 🍀</p>
+      `
+    });
+
+    console.log("📧 Email enviado a", email);
+  }
+} catch (err) {
+  console.log("❌ Error enviando email:", err.message);
+}
 // CAMBIAR NÚMERO DE PEDIDO EN SHOPIFY
 try {
   await axios.put(

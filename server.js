@@ -3,9 +3,12 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
-const app = express();
 
+const app = express();
 app.use(bodyParser.json());
+
+/* ---------------- EMAIL ---------------- */
+
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -14,12 +17,12 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("Servidor activo");
-});
+/* ---------------- CONFIG ---------------- */
 
 const MAX_NUMBER = 200000;
 const DB_FILE = "tickets.json";
+
+/* ---------------- DB ---------------- */
 
 if (!fs.existsSync(DB_FILE)) {
   fs.writeFileSync(DB_FILE, JSON.stringify({ used: [] }));
@@ -33,6 +36,8 @@ function saveDB(data) {
   fs.writeFileSync(DB_FILE, JSON.stringify(data));
 }
 
+/* ---------------- GENERADOR ---------------- */
+
 function generateTickets(qty) {
   const db = getDB();
   let start;
@@ -41,6 +46,7 @@ function generateTickets(qty) {
   while (!valid) {
     start = Math.floor(Math.random() * (MAX_NUMBER - qty));
     valid = true;
+
     for (let i = 0; i < qty; i++) {
       if (db.used.includes(start + i)) {
         valid = false;
@@ -50,6 +56,7 @@ function generateTickets(qty) {
   }
 
   const tickets = [];
+
   for (let i = 0; i < qty; i++) {
     tickets.push(start + i);
     db.used.push(start + i);
@@ -59,78 +66,98 @@ function generateTickets(qty) {
   return tickets;
 }
 
+/* ---------------- WEBHOOK ---------------- */
+
 app.post("/webhook", async (req, res) => {
+
   const order = req.body;
 
-  console.log("🧾 Pedido recibido:");
-  console.log(JSON.stringify(order, null, 2));
+  console.log("🧾 Pedido recibido:", order.order_number);
 
   let qty = 0;
 
-order.line_items.forEach(item => {
-
-  const price = parseFloat(item.price);
-
-  if (price === 1000) qty += 1;
-  if (price === 3000) qty += 5;
-  if (price === 5000) qty += 10;
-
-});
+  order.line_items.forEach(item => {
+    const price = parseFloat(item.price);
+    if (price === 1000) qty += 1;
+    if (price === 3000) qty += 5;
+    if (price === 5000) qty += 10;
+  });
 
   const tickets = generateTickets(qty);
 
   console.log("🔥 Tickets generados:", tickets);
-// ENVIAR EMAIL CON TICKETS
-try {
-  const email = order.email;
 
-  if (email && tickets.length > 0) {
-    await transporter.sendMail({
-      from: `"Rifas Jean" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "🎟️ Tus números de rifa",
-      html: `
-        <h2>Gracias por tu compra</h2>
-        <p>Estos son tus números:</p>
-        <h3>${tickets.join(", ")}</h3>
-        <p>Mucha suerte 🍀</p>
-      `
-    });
+  /* ---------- EMAIL ---------- */
 
-    console.log("📧 Email enviado a", email);
-  }
-} catch (err) {
-  console.log("❌ Error enviando email:", err.message);
-}
-// CAMBIAR NÚMERO DE PEDIDO EN SHOPIFY
-try {
-  await axios.put(
-    `https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${order.id}.json`,
-    {
-      order: {
-  id: order.id,
-  note: "Tickets: " + tickets.join(", "),
-  name: `RJ-${order.order_number}-${Math.floor(Math.random()*900+100)}`
-}
-    },
-    {
-      headers: {
-        "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-      }
+  try {
+    if (order.email && tickets.length > 0) {
+      await transporter.sendMail({
+        from: `"Rifas Jean" <${process.env.EMAIL_USER}>`,
+        to: order.email,
+        subject: "🎟️ Tus números de rifa",
+        html: `
+          <h2>Gracias por tu compra</h2>
+          <p>Estos son tus números:</p>
+          <h3>${tickets.join(", ")}</h3>
+          <p>Mucha suerte 🍀</p>
+        `
+      });
+
+      console.log("📧 Email enviado a", order.email);
     }
-  );
+  } catch (err) {
+    console.log("❌ Error enviando email:", err.message);
+  }
 
-  console.log("✅ Pedido renombrado");
-} catch (err) {
-  console.log("⚠️ No se pudo renombrar pedido");
-}
+  /* ---------- GUARDAR EN SHOPIFY ---------- */
+
+  try {
+
+    await axios.put(
+      `https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${order.id}.json`,
+      {
+        order: {
+          id: order.id,
+
+          /* 👇 ESTO ES LO IMPORTANTE */
+          note: "🎟️ Tickets: " + tickets.join(", "),
+
+          note_attributes: [
+            {
+              name: "Tickets",
+              value: tickets.join(", ")
+            }
+          ],
+
+          tags: "rifa, tickets-generados"
+        }
+      },
+      {
+        headers: {
+          "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ Tickets guardados en Shopify");
+
+  } catch (err) {
+    console.log("❌ Error guardando en Shopify:", err.response?.data || err.message);
+  }
 
   res.status(200).send({ tickets });
 });
 
-const PORT = process.env.PORT || 3000;
+/* ---------------- SERVER ---------------- */
+
+app.get("/", (req, res) => {
+  res.send("Servidor activo");
+});
+
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
   console.log("Servidor corriendo en puerto", PORT);
 });
+

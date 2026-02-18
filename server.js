@@ -55,11 +55,15 @@ app.post("/webhook", (req, res) => {
 
   let qty = 0;
 
-  order.line_items.forEach(item => {
-    if (item.title.includes("1 Ticket")) qty += 1;
-    if (item.title.includes("5 Tickets")) qty += 5;
-    if (item.title.includes("10 Tickets")) qty += 10;
-  });
+order.line_items.forEach(item => {
+
+  const price = parseFloat(item.price);
+
+  if (price === 1000) qty += 1;
+  if (price === 3000) qty += 5;
+  if (price === 5000) qty += 10;
+
+});
 
   const tickets = generateTickets(qty);
 

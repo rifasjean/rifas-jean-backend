@@ -53,6 +53,9 @@ function generateTickets(qty) {
 app.post("/webhook", (req, res) => {
   const order = req.body;
 
+  console.log("🧾 Pedido recibido:");
+  console.log(JSON.stringify(order, null, 2));
+
   let qty = 0;
 
 order.line_items.forEach(item => {

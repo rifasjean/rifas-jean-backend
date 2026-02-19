@@ -2,30 +2,42 @@ const axios = require("axios");
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
-const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(bodyParser.json({ limit: "2mb" }));
 
-/* ---------------- EMAIL (FIX SMTP) ---------------- */
-// Cambiado: en Render suele fallar "service: gmail" por red/timeout.
-// Esto fuerza SMTP real.
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
-  requireTLS: true
-});
+/* ---------------- RESEND ---------------- */
 
-// Log de salud SMTP (sirve para ver si Render está bloqueando)
-transporter.verify((err) => {
-  if (err) console.log("❌ SMTP no conecta:", err.message);
-  else console.log("✅ SMTP listo");
-});
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || "onboarding@resend.dev"; // mejor luego usar tu dominio
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://rifas-jean-backend.onrender.com";
+
+async function sendEmailResend({ to, subject, html }) {
+  if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY no configurada");
+
+  const resp = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM,
+      to,
+      subject,
+      html,
+    }),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+
+  if (!resp.ok) {
+    const msg = data?.message || data?.error || JSON.stringify(data);
+    throw new Error(msg);
+  }
+
+  return data; // { id: ... }
+}
 
 /* ---------------- CONFIG ---------------- */
 
@@ -50,7 +62,6 @@ function getDB() {
     if (!raw.trim()) return ensureDBShape({ used: [], orders: {} });
     return ensureDBShape(JSON.parse(raw));
   } catch (e) {
-    // Si se corrompe, recupera
     return ensureDBShape({ used: [], orders: {} });
   }
 }
@@ -60,10 +71,10 @@ function saveDB(db) {
 }
 
 /* ---------------- SIMPLE LOCK ---------------- */
-// Evita duplicados por concurrencia (webhooks simultáneos)
+
 let writing = false;
 async function withLock(fn) {
-  while (writing) await new Promise(r => setTimeout(r, 50));
+  while (writing) await new Promise((r) => setTimeout(r, 50));
   writing = true;
   try {
     return await fn();
@@ -109,13 +120,26 @@ function generateTickets(db, qty) {
   return tickets;
 }
 
+/* ---------------- HELPERS ---------------- */
+
+function calcQtyFromLineItems(order) {
+  let qty = 0;
+  (order.line_items || []).forEach((item) => {
+    const price = parseFloat(String(item.price || "").replace(",", "."));
+    if (price === 1000) qty += 1;
+    if (price === 3000) qty += 5;
+    if (price === 5000) qty += 10;
+  });
+  return qty;
+}
+
 /* ---------------- WEBHOOK ---------------- */
 
 app.post("/webhook", async (req, res) => {
   const order = req.body;
 
   const orderNumber = order?.order_number; // ej 1023
-  const orderId = order?.id;               // id interno Shopify
+  const orderId = order?.id; // id interno Shopify
   const email = order?.email || null;
 
   console.log("🧾 Pedido recibido:", orderNumber);
@@ -125,43 +149,33 @@ app.post("/webhook", async (req, res) => {
   }
 
   // 1) Generación + guardado IDEMPOTENTE con lock
-  const result = await withLock(async () => {
+  const { tickets } = await withLock(async () => {
     const db = getDB();
 
     // ✅ Si ya existe la orden, devolvemos lo mismo (NO regenerar)
     if (db.orders[orderNumber]?.tickets?.length) {
       console.log("♻️ Orden repetida, devolviendo mismos tickets");
-      return { tickets: db.orders[orderNumber].tickets, alreadyExisted: true };
+      return { tickets: db.orders[orderNumber].tickets };
     }
 
-    // Calcular qty por precio (lo dejé como lo usas tú)
-    let qty = 0;
-    (order.line_items || []).forEach(item => {
-      const price = parseFloat(String(item.price || "").replace(",", "."));
-      if (price === 1000) qty += 1;
-      if (price === 3000) qty += 5;
-      if (price === 5000) qty += 10;
-    });
+    const qty = calcQtyFromLineItems(order);
 
     // Guardamos aunque qty sea 0 para bloquear reintentos
-    const tickets = qty > 0 ? generateTickets(db, qty) : [];
+    const ticketsNew = qty > 0 ? generateTickets(db, qty) : [];
 
     db.orders[orderNumber] = {
-      tickets,
+      tickets: ticketsNew,
       email,
       shopifyOrderId: orderId,
       createdAt: new Date().toISOString(),
-      // ✅ importantísimo: estado para evitar re-envíos
-      emailSent: false
+      emailSent: false,
     };
 
     saveDB(db);
 
-    console.log("🔥 Tickets generados:", tickets);
-    return { tickets, alreadyExisted: false };
+    console.log("🔥 Tickets generados:", ticketsNew);
+    return { tickets: ticketsNew };
   });
-
-  const tickets = result.tickets;
 
   // 2) EMAIL (idempotente: solo si NO se envió antes)
   try {
@@ -182,8 +196,9 @@ app.post("/webhook", async (req, res) => {
       });
 
       if (shouldSend) {
-        await transporter.sendMail({
-          from: `"Rifas Jean" <${process.env.EMAIL_USER}>`,
+        const link = `${PUBLIC_BASE_URL}/tickets?order=${orderNumber}`;
+
+        await sendEmailResend({
           to: email,
           subject: "🎟️ Tus números de rifa",
           html: `
@@ -192,19 +207,17 @@ app.post("/webhook", async (req, res) => {
             <h3>${tickets.join(", ")}</h3>
             <p>Mucha suerte 🍀</p>
             <p>Ver tickets online:</p>
-            <a href="https://rifas-jean-backend.onrender.com/tickets?order=${orderNumber}">
-              Ver mis tickets online
-            </a>
-          `
+            <a href="${link}">Ver mis tickets online</a>
+          `,
         });
 
-        console.log("📧 Email enviado a", email);
+        console.log("📧 Email enviado (Resend) a", email);
       }
     }
   } catch (err) {
-    // Si falló el envío, desmarcamos emailSent para que puedas reintentar manualmente
-    console.log("❌ Error enviando email:", err.message);
+    console.log("❌ Error enviando email (Resend):", err.message);
 
+    // Si falló el envío, desmarcamos emailSent para reintentar
     await withLock(async () => {
       const db = getDB();
       if (db.orders[orderNumber]) {
@@ -224,14 +237,14 @@ app.post("/webhook", async (req, res) => {
             id: orderId,
             note: "🎟️ Tickets: " + tickets.join(", "),
             note_attributes: [{ name: "Tickets", value: tickets.join(", ") }],
-            tags: "rifa, tickets-generados"
-          }
+            tags: "rifa, tickets-generados",
+          },
         },
         {
           headers: {
             "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-            "Content-Type": "application/json"
-          }
+            "Content-Type": "application/json",
+          },
         }
       );
       console.log("✅ Tickets guardados en Shopify");
@@ -277,3 +290,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("Servidor corriendo en puerto", PORT);
 });
+

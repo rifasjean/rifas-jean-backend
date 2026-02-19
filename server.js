@@ -12,13 +12,13 @@ app.use(bodyParser.json({ limit: "2mb" }));
 // Esto fuerza SMTP real.
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
+  port: 587,
+  secure: false,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   },
-  tls: { servername: "smtp.gmail.com" }
+  requireTLS: true
 });
 
 // Log de salud SMTP (sirve para ver si Render está bloqueando)

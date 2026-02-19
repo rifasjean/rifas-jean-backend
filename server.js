@@ -84,6 +84,17 @@ app.post("/webhook", async (req, res) => {
   });
 
   const tickets = generateTickets(qty);
+const orderNumber = order.order_number;
+
+const db = getDB();
+db.orders = db.orders || {};
+
+db.orders[orderNumber] = {
+  tickets,
+  email: order.email
+};
+
+saveDB(db);
 
   console.log("🔥 Tickets generados:", tickets);
 
@@ -96,10 +107,16 @@ app.post("/webhook", async (req, res) => {
         to: order.email,
         subject: "🎟️ Tus números de rifa",
         html: `
-          <h2>Gracias por tu compra</h2>
-          <p>Estos son tus números:</p>
-          <h3>${tickets.join(", ")}</h3>
-          <p>Mucha suerte 🍀</p>
+  <h2>Gracias por tu compra</h2>
+  <p>Estos son tus números:</p>
+  <h3>${tickets.join(", ")}</h3>
+  <p>Mucha suerte 🍀</p>
+
+  <p>También puedes ver tus tickets aquí:</p>
+
+  <a href="https://rifas-jean-backend.onrender.com/tickets?order=${order.order_number}">
+    Ver mis tickets online
+  </a>
         `
       });
 
@@ -156,6 +173,22 @@ app.get("/", (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
+
+app.get("/tickets", (req, res) => {
+  const order = req.query.order;
+  const db = getDB();
+
+  if (!db.orders || !db.orders[order]) {
+    return res.send("No se encontraron tickets");
+  }
+
+  const tickets = db.orders[order].tickets;
+
+  res.send(`
+    <h1>Tus números de rifa</h1>
+    <h2>${tickets.join(", ")}</h2>
+  `);
+});
 
 app.listen(PORT, () => {
   console.log("Servidor corriendo en puerto", PORT);

@@ -5,16 +5,26 @@ const fs = require("fs");
 const nodemailer = require("nodemailer");
 
 const app = express();
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: "2mb" }));
 
-/* ---------------- EMAIL ---------------- */
-
+/* ---------------- EMAIL (FIX SMTP) ---------------- */
+// Cambiado: en Render suele fallar "service: gmail" por red/timeout.
+// Esto fuerza SMTP real.
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  }
+  },
+  tls: { servername: "smtp.gmail.com" }
+});
+
+// Log de salud SMTP (sirve para ver si Render está bloqueando)
+transporter.verify((err) => {
+  if (err) console.log("❌ SMTP no conecta:", err.message);
+  else console.log("✅ SMTP listo");
 });
 
 /* ---------------- CONFIG ---------------- */
@@ -40,7 +50,7 @@ function getDB() {
     if (!raw.trim()) return ensureDBShape({ used: [], orders: {} });
     return ensureDBShape(JSON.parse(raw));
   } catch (e) {
-    // Si el JSON se corrompe, lo recuperamos
+    // Si se corrompe, recupera
     return ensureDBShape({ used: [], orders: {} });
   }
 }
@@ -50,12 +60,10 @@ function saveDB(db) {
 }
 
 /* ---------------- SIMPLE LOCK ---------------- */
-// Para evitar que 2 webhooks al mismo tiempo generen números repetidos
+// Evita duplicados por concurrencia (webhooks simultáneos)
 let writing = false;
 async function withLock(fn) {
-  while (writing) {
-    await new Promise(r => setTimeout(r, 50));
-  }
+  while (writing) await new Promise(r => setTimeout(r, 50));
   writing = true;
   try {
     return await fn();
@@ -67,19 +75,16 @@ async function withLock(fn) {
 /* ---------------- GENERADOR ---------------- */
 
 function generateTickets(db, qty) {
-  let start;
-  let valid = false;
-
-  // Seguridad: no permitir qty raro
   qty = Number(qty) || 0;
   if (qty <= 0) return [];
 
-  // Evitar loop infinito si se agota el rango
   const maxStart = MAX_NUMBER - qty;
   if (maxStart <= 0) return [];
 
-  // Set para buscar rápido (mucho más rápido que includes)
   const usedSet = new Set(db.used);
+
+  let start;
+  let valid = false;
 
   while (!valid) {
     start = Math.floor(Math.random() * maxStart);
@@ -109,8 +114,9 @@ function generateTickets(db, qty) {
 app.post("/webhook", async (req, res) => {
   const order = req.body;
 
-  const orderNumber = order?.order_number;
-  const orderId = order?.id;
+  const orderNumber = order?.order_number; // ej 1023
+  const orderId = order?.id;               // id interno Shopify
+  const email = order?.email || null;
 
   console.log("🧾 Pedido recibido:", orderNumber);
 
@@ -118,64 +124,64 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).send({ error: "Order inválida (sin order_number o id)" });
   }
 
-  // Todo lo crítico con lock para evitar duplicados por concurrencia
+  // 1) Generación + guardado IDEMPOTENTE con lock
   const result = await withLock(async () => {
     const db = getDB();
 
-    // ✅ IDEMPOTENCIA REAL: si ya existe, NO generar de nuevo
+    // ✅ Si ya existe la orden, devolvemos lo mismo (NO regenerar)
     if (db.orders[orderNumber]?.tickets?.length) {
       console.log("♻️ Orden repetida, devolviendo mismos tickets");
-      return { db, tickets: db.orders[orderNumber].tickets, alreadyExisted: true };
+      return { tickets: db.orders[orderNumber].tickets, alreadyExisted: true };
     }
 
-    // Calcular qty
+    // Calcular qty por precio (lo dejé como lo usas tú)
     let qty = 0;
     (order.line_items || []).forEach(item => {
-      const price = Number(String(item.price || "").replace(",", ".")); // por si viene raro
+      const price = parseFloat(String(item.price || "").replace(",", "."));
       if (price === 1000) qty += 1;
       if (price === 3000) qty += 5;
       if (price === 5000) qty += 10;
     });
 
-    if (qty <= 0) {
-      // Guardamos igual la orden para que si Shopify reintenta no haga nada
-      db.orders[orderNumber] = {
-        tickets: [],
-        email: order.email || null,
-        shopifyOrderId: orderId,
-        createdAt: new Date().toISOString(),
-        emailSent: false
-      };
-      saveDB(db);
-      return { db, tickets: [], alreadyExisted: false };
-    }
-
-    const tickets = generateTickets(db, qty);
+    // Guardamos aunque qty sea 0 para bloquear reintentos
+    const tickets = qty > 0 ? generateTickets(db, qty) : [];
 
     db.orders[orderNumber] = {
       tickets,
-      email: order.email || null,
+      email,
       shopifyOrderId: orderId,
       createdAt: new Date().toISOString(),
+      // ✅ importantísimo: estado para evitar re-envíos
       emailSent: false
     };
 
     saveDB(db);
 
     console.log("🔥 Tickets generados:", tickets);
-    return { db, tickets, alreadyExisted: false };
+    return { tickets, alreadyExisted: false };
   });
 
-  const { db, tickets } = result;
+  const tickets = result.tickets;
 
-  /* ---------- EMAIL (solo si no se ha enviado antes) ---------- */
-
+  // 2) EMAIL (idempotente: solo si NO se envió antes)
   try {
-    const email = order.email;
-
     if (email && tickets.length > 0) {
-      // evitar re-envíos si el webhook se repite
-      if (!db.orders[orderNumber].emailSent) {
+      const shouldSend = await withLock(async () => {
+        const db = getDB();
+        if (!db.orders[orderNumber]) return false;
+
+        if (db.orders[orderNumber].emailSent) {
+          console.log("✉️ Email ya estaba enviado para esta orden, no reenviando");
+          return false;
+        }
+
+        // marcamos ANTES de enviar para evitar doble envío si hay 2 webhooks
+        db.orders[orderNumber].emailSent = true;
+        saveDB(db);
+        return true;
+      });
+
+      if (shouldSend) {
         await transporter.sendMail({
           from: `"Rifas Jean" <${process.env.EMAIL_USER}>`,
           to: email,
@@ -185,35 +191,31 @@ app.post("/webhook", async (req, res) => {
             <p>Estos son tus números:</p>
             <h3>${tickets.join(", ")}</h3>
             <p>Mucha suerte 🍀</p>
-            <p>También puedes ver tus tickets aquí:</p>
+            <p>Ver tickets online:</p>
             <a href="https://rifas-jean-backend.onrender.com/tickets?order=${orderNumber}">
               Ver mis tickets online
             </a>
           `
         });
 
-        // marcar enviado con lock
-        await withLock(async () => {
-          const db2 = getDB();
-          if (db2.orders[orderNumber]) {
-            db2.orders[orderNumber].emailSent = true;
-            saveDB(db2);
-          }
-        });
-
         console.log("📧 Email enviado a", email);
-      } else {
-        console.log("✉️ Email ya estaba enviado para esta orden, no reenviando");
       }
     }
   } catch (err) {
+    // Si falló el envío, desmarcamos emailSent para que puedas reintentar manualmente
     console.log("❌ Error enviando email:", err.message);
+
+    await withLock(async () => {
+      const db = getDB();
+      if (db.orders[orderNumber]) {
+        db.orders[orderNumber].emailSent = false;
+        saveDB(db);
+      }
+    });
   }
 
-  /* ---------- SHOPIFY (opcional, solo si tienes variables bien) ---------- */
-
+  // 3) SHOPIFY (opcional)
   try {
-    // Si no están las env vars, no intentes
     if (process.env.SHOPIFY_STORE && process.env.SHOPIFY_ACCESS_TOKEN) {
       await axios.put(
         `https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${orderId}.json`,
@@ -221,9 +223,7 @@ app.post("/webhook", async (req, res) => {
           order: {
             id: orderId,
             note: "🎟️ Tickets: " + tickets.join(", "),
-            note_attributes: [
-              { name: "Tickets", value: tickets.join(", ") }
-            ],
+            note_attributes: [{ name: "Tickets", value: tickets.join(", ") }],
             tags: "rifa, tickets-generados"
           }
         },
@@ -234,7 +234,6 @@ app.post("/webhook", async (req, res) => {
           }
         }
       );
-
       console.log("✅ Tickets guardados en Shopify");
     } else {
       console.log("ℹ️ Shopify env vars no configuradas, saltando guardado en Shopify");
@@ -265,14 +264,11 @@ app.get("/tickets", (req, res) => {
   const data = db.orders[orderNumber];
   const tickets = data.tickets || [];
 
-  if (!tickets.length) {
-    return res.send("No se encontraron tickets");
-  }
+  if (!tickets.length) return res.send("No se encontraron tickets");
 
   res.send(`
     <h1>Tus números de rifa</h1>
     <p><b>Orden:</b> ${orderNumber}</p>
-    <p><b>Email:</b> ${data.email || "-"}</p>
     <h2>${tickets.join(", ")}</h2>
   `);
 });

@@ -99,6 +99,14 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
   if (!apiKey) throw new Error("RESEND_API_KEY no está configurada");
   if (!from) throw new Error("RESEND_FROM no está configurada");
 
+  // ✅ TEXTO PLANO (anti-spam)
+  const text = String(html || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -106,7 +114,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: Bearer ${apiKey},
         "Content-Type": "application/json",
       },
       signal: controller.signal,
@@ -115,7 +123,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
         to,
         subject,
         html,
-        // reply_to es aceptado por Resend; si no lo quieres, deja replyTo null
+        text, // ✅ clave anti-spam
         ...(replyTo ? { reply_to: replyTo } : {}),
       }),
     });
@@ -123,7 +131,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      throw new Error(data?.message || `Resend error HTTP ${resp.status}`);
+      throw new Error(data?.message || Resend error HTTP ${resp.status});
     }
 
     return data;

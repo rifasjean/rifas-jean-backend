@@ -10,6 +10,9 @@ app.use(bodyParser.json({ limit: "2mb" }));
 
 const MAX_NUMBER = 200000;
 const DB_FILE = "/var/data/tickets.json";
+if (!fs.existsSync("/var/data")) {
+  fs.mkdirSync("/var/data", { recursive: true });
+}
 
 /* ---------------- DB SAFE ---------------- */
 
@@ -291,6 +294,28 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", (req, res) => {
   res.send("Servidor activo");
+});
+
+app.get("/tickets", (req, res) => {
+  const orderNumber = String(req.query.order || "").trim();
+  const db = getDB();
+
+  if (!orderNumber) return res.status(400).send("Orden no especificada");
+
+  if (!db.orders || !db.orders[orderNumber]) {
+    return res.status(404).send("No se encontraron tickets");
+  }
+
+  const data = db.orders[orderNumber];
+  const tickets = data.tickets || [];
+
+  if (!tickets.length) return res.status(404).send("No se encontraron tickets");
+
+  res.send(`
+    <h1>Tus números de rifa</h1>
+    <p><b>Orden:</b> ${orderNumber}</p>
+    <h2>${tickets.join(", ")}</h2>
+  `);
 });
 
 const PORT = process.env.PORT || 10000;

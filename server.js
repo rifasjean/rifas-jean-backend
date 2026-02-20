@@ -114,7 +114,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: Bearer ${apiKey},
+        Authorization: Bearer ${apiKey}, // ✅ FIX
         "Content-Type": "application/json",
       },
       signal: controller.signal,
@@ -131,7 +131,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      throw new Error(data?.message || Resend error HTTP ${resp.status});
+      throw new Error(data?.message || Resend error HTTP ${resp.status}); // ✅ FIX
     }
 
     return data;

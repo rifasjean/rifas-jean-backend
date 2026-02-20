@@ -9,7 +9,7 @@ app.use(bodyParser.json({ limit: "2mb" }));
 /* ---------------- CONFIG ---------------- */
 
 const MAX_NUMBER = 200000;
-const DB_FILE = "tickets.json";
+const DB_FILE = "/var/data/tickets.json";
 
 /* ---------------- DB SAFE ---------------- */
 

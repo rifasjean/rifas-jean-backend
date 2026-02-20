@@ -44,7 +44,7 @@ function saveDB(db) {
 // Evita duplicados por concurrencia (webhooks simultáneos)
 let writing = false;
 async function withLock(fn) {
-  while (writing) await new Promise(r => setTimeout(r, 50));
+  while (writing) await new Promise((r) => setTimeout(r, 50));
   writing = true;
   try {
     return await fn();
@@ -114,7 +114,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: Bearer ${apiKey}, // ✅ FIX
+        Authorization: `Bearer ${apiKey}`, // ✅ FIX REAL
         "Content-Type": "application/json",
       },
       signal: controller.signal,
@@ -131,7 +131,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      throw new Error(data?.message || Resend error HTTP ${resp.status}); // ✅ FIX
+      throw new Error(data?.message || `Resend error HTTP ${resp.status}`); // ✅ FIX REAL
     }
 
     return data;
@@ -146,7 +146,7 @@ app.post("/webhook", async (req, res) => {
   const order = req.body;
 
   const orderNumber = order?.order_number; // ej 1028
-  const orderId = order?.id;               // id interno Shopify
+  const orderId = order?.id; // id interno Shopify
   const emailIncoming = order?.email || null;
 
   console.log("🧾 Pedido recibido:", orderNumber);
@@ -184,12 +184,16 @@ app.post("/webhook", async (req, res) => {
         return { tickets: existingTickets, shouldSendEmail: true, sendToEmail: existing.email };
       }
 
-      return { tickets: existingTickets, shouldSendEmail: false, sendToEmail: existing.email || null };
+      return {
+        tickets: existingTickets,
+        shouldSendEmail: false,
+        sendToEmail: existing.email || null,
+      };
     }
 
     // Orden nueva: calcular qty
     let qty = 0;
-    (order.line_items || []).forEach(item => {
+    (order.line_items || []).forEach((item) => {
       const price = parseFloat(String(item.price || "").replace(",", "."));
       if (price === 1000) qty += 1;
       if (price === 3000) qty += 5;
@@ -200,10 +204,10 @@ app.post("/webhook", async (req, res) => {
 
     db.orders[orderNumber] = {
       tickets: ticketsNew,
-      email: emailIncoming,          // guardamos el email “oficial” de esa orden
+      email: emailIncoming, // guardamos el email “oficial” de esa orden
       shopifyOrderId: orderId,
       createdAt: new Date().toISOString(),
-      emailSent: false
+      emailSent: false,
     };
 
     // Si hay email y tickets, marcamos emailSent=true ANTES para bloquear dobles envíos
@@ -219,7 +223,7 @@ app.post("/webhook", async (req, res) => {
     return { tickets: ticketsNew, shouldSendEmail: canSend, sendToEmail: emailIncoming };
   });
 
-  // ✅ 2) RESPONDER 200 OK INMEDIATO (lo más importante)
+  // ✅ 2) RESPONDER 200 OK INMEDIATO
   res.status(200).send({ tickets });
 
   // 3) Todo lo lento va DESPUÉS (background)
@@ -261,9 +265,9 @@ app.post("/webhook", async (req, res) => {
         });
       }
     } else {
-      // Esto explica por qué a veces veías logs raros:
-      // ahora queda consistente y con orden en el log.
-      console.log(`✉️ No se envía email (orden ${orderNumber}) (ya enviado o sin email o sin tickets)`);
+      console.log(
+        `✉️ No se envía email (orden ${orderNumber}) (ya enviado o sin email o sin tickets)`
+      );
     }
 
     // 3B) Shopify update (opcional)
@@ -276,15 +280,15 @@ app.post("/webhook", async (req, res) => {
               id: orderId,
               note: "🎟️ Tickets: " + tickets.join(", "),
               note_attributes: [{ name: "Tickets", value: tickets.join(", ") }],
-              tags: "rifa, tickets-generados"
-            }
+              tags: "rifa, tickets-generados",
+            },
           },
           {
             headers: {
               "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
             },
-            timeout: 5000
+            timeout: 5000,
           }
         );
 
@@ -330,5 +334,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("Servidor corriendo en puerto", PORT);
 });
-
 

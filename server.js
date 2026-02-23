@@ -55,6 +55,55 @@ async function withLock(fn) {
   }
 }
 
+/* ---------------- HELPERS ---------------- */
+
+function normalizeCLP(value) {
+  // Soporta "5000", "5000.00", "$5.000", "5.000", "5,000", "5000,00", etc.
+  const s = String(value ?? "").trim();
+  if (!s) return NaN;
+
+  let clean = s.replace(/[^\d.,-]/g, "");
+
+  // Si tiene '.' y NO tiene ',', asumimos '.' como miles si el último bloque tiene 3 dígitos
+  if (clean.includes(".") && !clean.includes(",")) {
+    const parts = clean.split(".");
+    const last = parts[parts.length - 1];
+    if (last.length === 3) clean = parts.join("");
+  }
+
+  // Si tiene ',' y NO tiene '.', tomamos ',' como decimal
+  if (clean.includes(",") && !clean.includes(".")) {
+    clean = clean.replace(",", ".");
+  }
+
+  // Si tiene ambos, dejamos solo el último separador como decimal
+  if (clean.includes(",") && clean.includes(".")) {
+    const lastComma = clean.lastIndexOf(",");
+    const lastDot = clean.lastIndexOf(".");
+    const decPos = Math.max(lastComma, lastDot);
+
+    const intPart = clean.slice(0, decPos).replace(/[.,]/g, "");
+    const decPart = clean.slice(decPos + 1).replace(/[^\d]/g, "");
+    clean = decPart ? `${intPart}.${decPart}` : intPart;
+  }
+
+  const n = Number(clean);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function calcExpectedQtyFromOrder(order) {
+  let qty = 0;
+  (order.line_items || []).forEach((item) => {
+    const price = normalizeCLP(item.price);
+    const q = Number(item.quantity || 1);
+
+    if (price === 1000) qty += 1 * q;
+    if (price === 3000) qty += 5 * q;
+    if (price === 5000) qty += 10 * q;
+  });
+  return qty;
+}
+
 /* ---------------- GENERADOR ---------------- */
 
 function generateTickets(db, qty) {
@@ -69,8 +118,10 @@ function generateTickets(db, qty) {
   let start;
   let valid = false;
 
+  // Recomendación: tickets desde 1 (no 0)
+  // Si quieres permitir 0, cambia start = 0 y has start + i
   while (!valid) {
-    start = Math.floor(Math.random() * maxStart);
+    start = 1 + Math.floor(Math.random() * maxStart); // 1..maxStart
     valid = true;
 
     for (let i = 0; i < qty; i++) {
@@ -125,7 +176,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
         to,
         subject,
         html,
-        text, // ✅ clave anti-spam
+        text,
         ...(replyTo ? { reply_to: replyTo } : {}),
       }),
     });
@@ -173,13 +224,10 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // No regenerar tickets
       console.log("♻️ Orden repetida, devolviendo mismos tickets");
 
-      // Email: si ya fue enviado, NO reenviar
       const canSend = !!(existing.email && !existing.emailSent && existingTickets.length);
 
-      // Si se puede enviar, marcamos emailSent=true ANTES (para evitar dobles)
       if (canSend) {
         existing.emailSent = true;
         saveDB(db);
@@ -193,18 +241,10 @@ app.post("/webhook", async (req, res) => {
       };
     }
 
-    // ✅ Orden nueva: calcular qty (SOporta quantity)
-    let qty = 0;
-    (order.line_items || []).forEach((item) => {
-      const price = parseFloat(String(item.price || "").replace(",", "."));
-      const q = Number(item.quantity || 1);
+    // ✅ Orden nueva: calcular qty (soporta quantity + BLINDA CLP)
+    const qty = calcExpectedQtyFromOrder(order);
 
-      if (price === 1000) qty += 1 * q;
-      if (price === 3000) qty += 5 * q;
-      if (price === 5000) qty += 10 * q;
-    });
-
-    // ✅ LOGS TEMPORALES (para 1 prueba y luego se borran)
+    // ✅ LOGS TEMPORALES (para confirmar 1-2 días y luego borrar)
     console.log(
       "🧾 line_items:",
       (order.line_items || []).map((i) => ({
@@ -219,14 +259,13 @@ app.post("/webhook", async (req, res) => {
 
     db.orders[orderNumber] = {
       tickets: ticketsNew,
-      email: emailIncoming, // email oficial de la orden
+      email: emailIncoming,
       shopifyOrderId: orderId,
       createdAt: new Date().toISOString(),
       emailSent: false,
-      expectedQty: qty, // ✅ NUEVO: cuántos tickets debería tener esta orden
+      expectedQty: qty,
     };
 
-    // Si hay email y tickets, marcamos emailSent=true ANTES para bloquear dobles envíos
     let canSend = false;
     if (emailIncoming && ticketsNew.length) {
       db.orders[orderNumber].emailSent = true;
@@ -244,11 +283,9 @@ app.post("/webhook", async (req, res) => {
 
   // 3) Todo lo lento va DESPUÉS (background)
   setImmediate(async () => {
-    // 3A) EMAIL por Resend (timeout corto)
     if (shouldSendEmail && sendToEmail && tickets.length) {
       try {
         const subject = "🎟️ Tus números de rifa";
-
         const html = `
           <h2>Gracias por tu compra</h2>
           <p>Estos son tus números:</p>
@@ -263,14 +300,13 @@ app.post("/webhook", async (req, res) => {
           subject,
           html,
           replyTo,
-          timeoutMs: 5000, // timeout corto
+          timeoutMs: 5000,
         });
 
         console.log(`📧 Email enviado (Resend) a ${sendToEmail} (orden ${orderNumber})`);
       } catch (err) {
         console.log(`❌ Error enviando email (Resend) orden ${orderNumber}:`, err.message);
 
-        // Si falló, desmarcamos emailSent=false para que el próximo reintento pueda reenviar
         await withLock(async () => {
           const db2 = getDB();
           if (db2.orders[orderNumber]) {
@@ -343,6 +379,149 @@ app.get("/tickets", (req, res) => {
     <p><b>Orden:</b> ${orderNumber}</p>
     <h2>${tickets.join(", ")}</h2>
   `);
+});
+
+/* ---------------- ADMIN TOKEN ---------------- */
+function requireAdmin(req, res) {
+  const token = String(req.query.token || req.headers["x-admin-token"] || "");
+  const adminToken = process.env.ADMIN_TOKEN;
+
+  if (!adminToken) {
+    res.status(500).send("ADMIN_TOKEN no está configurado en Render");
+    return false;
+  }
+  if (!token || token !== adminToken) {
+    res.status(401).send("No autorizado");
+    return false;
+  }
+  return true;
+}
+
+/* ---------------- ADMIN: REPAIR ORDER ---------------- */
+/**
+ * GET /admin/repair?order=1204&expected=34&token=XXX
+ */
+app.get("/admin/repair", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const orderNumber = String(req.query.order || "").trim();
+  const expectedFromQuery = req.query.expected ? Number(req.query.expected) : null;
+
+  if (!orderNumber) return res.status(400).send("Falta ?order=####");
+
+  const result = await withLock(async () => {
+    const db = getDB();
+    const ord = db.orders?.[orderNumber];
+
+    if (!ord) return { ok: false, code: 404, msg: "Orden no existe en DB" };
+
+    const current = Array.isArray(ord.tickets) ? ord.tickets : [];
+    const expected =
+      Number.isFinite(expectedFromQuery) && expectedFromQuery > 0
+        ? expectedFromQuery
+        : Number(ord.expectedQty || current.length);
+
+    const missing = expected - current.length;
+
+    if (missing <= 0) {
+      ord.expectedQty = expected;
+      saveDB(db);
+      return {
+        ok: true,
+        repaired: false,
+        order: orderNumber,
+        expected,
+        current: current.length,
+        added: 0,
+        tickets: current,
+      };
+    }
+
+    const newOnes = generateTickets(db, missing);
+    ord.tickets = current.concat(newOnes);
+    ord.expectedQty = expected;
+
+    saveDB(db);
+
+    return {
+      ok: true,
+      repaired: true,
+      order: orderNumber,
+      expected,
+      current: ord.tickets.length,
+      added: newOnes.length,
+      addedTickets: newOnes,
+      tickets: ord.tickets,
+    };
+  });
+
+  if (!result.ok) return res.status(result.code).send(result.msg);
+  return res.status(200).json(result);
+});
+
+/* ---------------- ADMIN: RESEND FULL EMAIL ---------------- */
+/**
+ * GET /admin/resend?order=1204&token=XXX
+ */
+app.get("/admin/resend", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const orderNumber = String(req.query.order || "").trim();
+  if (!orderNumber) return res.status(400).send("Falta ?order=####");
+
+  const payload = await withLock(async () => {
+    const db = getDB();
+    const ord = db.orders?.[orderNumber];
+    if (!ord) return { ok: false, code: 404, msg: "Orden no existe en DB" };
+
+    const tickets = Array.isArray(ord.tickets) ? ord.tickets : [];
+    const email = ord.email || null;
+
+    if (!email) return { ok: false, code: 400, msg: "Orden no tiene email guardado" };
+    if (!tickets.length) return { ok: false, code: 400, msg: "Orden no tiene tickets" };
+
+    ord.emailSent = true;
+    saveDB(db);
+
+    return { ok: true, email, tickets };
+  });
+
+  if (!payload.ok) return res.status(payload.code).send(payload.msg);
+
+  res.status(200).send(`OK: reenviando a ${payload.email} (orden ${orderNumber})`);
+
+  setImmediate(async () => {
+    try {
+      const subject = "🎟️ Tus números de rifa (actualizados)";
+      const html = `
+        <h2>Gracias por tu compra</h2>
+        <p>Estos son tus números:</p>
+        <h3>${payload.tickets.join(", ")}</h3>
+        <p>Mucha suerte 🍀</p>
+      `;
+      const replyTo = process.env.REPLY_TO || null;
+
+      await sendWithResend({
+        to: payload.email,
+        subject,
+        html,
+        replyTo,
+        timeoutMs: 5000,
+      });
+
+      console.log(`📧 Reenvío OK a ${payload.email} (orden ${orderNumber})`);
+    } catch (err) {
+      console.log(`❌ Error reenvío (orden ${orderNumber}):`, err.message);
+
+      await withLock(async () => {
+        const db2 = getDB();
+        if (db2.orders?.[orderNumber]) {
+          db2.orders[orderNumber].emailSent = false;
+          saveDB(db2);
+        }
+      });
+    }
+  });
 });
 
 const PORT = process.env.PORT || 10000;

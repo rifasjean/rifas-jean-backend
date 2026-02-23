@@ -480,10 +480,23 @@ app.get("/admin/resend", async (req, res) => {
     if (!email) return { ok: false, code: 400, msg: "Orden no tiene email guardado" };
     if (!tickets.length) return { ok: false, code: 400, msg: "Orden no tiene tickets" };
 
-    ord.emailSent = true;
-    saveDB(db);
+   // 🚫 BLOQUEO: si ya fue reenviado manualmente, no volver a enviar
+const force = req.query.force === "1";
 
-    return { ok: true, email, tickets };
+if (ord.manualResent && !force) {
+  return {
+    ok: false,
+    code: 409,
+    msg: "Este pedido ya fue reenviado manualmente"
+  };
+}
+
+// Marcar como reenviado manual
+ord.manualResent = true;
+ord.emailSent = true;
+saveDB(db);
+
+return { ok: true, email, tickets };
   });
 
   if (!payload.ok) return res.status(payload.code).send(payload.msg);

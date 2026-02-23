@@ -10,6 +10,8 @@ app.use(bodyParser.json({ limit: "2mb" }));
 
 const MAX_NUMBER = 200000;
 const DB_FILE = "/var/data/tickets.json";
+
+// Asegura que exista el directorio del disk montado
 if (!fs.existsSync("/var/data")) {
   fs.mkdirSync("/var/data", { recursive: true });
 }
@@ -114,7 +116,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`, // ✅ FIX REAL
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       signal: controller.signal,
@@ -131,7 +133,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      throw new Error(data?.message || `Resend error HTTP ${resp.status}`); // ✅ FIX REAL
+      throw new Error(data?.message || `Resend error HTTP ${resp.status}`);
     }
 
     return data;
@@ -145,7 +147,7 @@ async function sendWithResend({ to, subject, html, replyTo, timeoutMs = 5000 }) 
 app.post("/webhook", async (req, res) => {
   const order = req.body;
 
-  const orderNumber = order?.order_number; // ej 1028
+  const orderNumber = order?.order_number; // ej 1056
   const orderId = order?.id; // id interno Shopify
   const emailIncoming = order?.email || null;
 
@@ -191,23 +193,37 @@ app.post("/webhook", async (req, res) => {
       };
     }
 
-    // Orden nueva: calcular qty
+    // ✅ Orden nueva: calcular qty (SOporta quantity)
     let qty = 0;
     (order.line_items || []).forEach((item) => {
       const price = parseFloat(String(item.price || "").replace(",", "."));
-      if (price === 1000) qty += 1;
-      if (price === 3000) qty += 5;
-      if (price === 5000) qty += 10;
+      const q = Number(item.quantity || 1);
+
+      if (price === 1000) qty += 1 * q;
+      if (price === 3000) qty += 5 * q;
+      if (price === 5000) qty += 10 * q;
     });
+
+    // ✅ LOGS TEMPORALES (para 1 prueba y luego se borran)
+    console.log(
+      "🧾 line_items:",
+      (order.line_items || []).map((i) => ({
+        title: i.title,
+        price: i.price,
+        quantity: i.quantity,
+      }))
+    );
+    console.log("🎟️ qty tickets calculada:", qty);
 
     const ticketsNew = qty > 0 ? generateTickets(db, qty) : [];
 
     db.orders[orderNumber] = {
       tickets: ticketsNew,
-      email: emailIncoming, // guardamos el email “oficial” de esa orden
+      email: emailIncoming, // email oficial de la orden
       shopifyOrderId: orderId,
       createdAt: new Date().toISOString(),
       emailSent: false,
+      expectedQty: qty, // ✅ NUEVO: cuántos tickets debería tener esta orden
     };
 
     // Si hay email y tickets, marcamos emailSent=true ANTES para bloquear dobles envíos
@@ -233,7 +249,6 @@ app.post("/webhook", async (req, res) => {
       try {
         const subject = "🎟️ Tus números de rifa";
 
-        // ✅ MISMO TEXTO, SOLO SIN LINK
         const html = `
           <h2>Gracias por tu compra</h2>
           <p>Estos son tus números:</p>
